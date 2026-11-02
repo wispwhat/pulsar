@@ -13,3 +13,6 @@ tmp/
 
 # agora hub agent id: per-machine runtime state, written by the agent on join
 .agora-agent-id
+
+# debugging files
+nohup.out

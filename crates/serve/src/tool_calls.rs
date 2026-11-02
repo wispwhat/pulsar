@@ -30,12 +30,49 @@ pub fn is_dsml_template(template: &str) -> bool {
     template.contains("DSML") || template.contains("｜DSML｜") || template.contains("|DSML|")
 }
 
+/// Rob
+
+/// True when a Jinja template uses Qwen3.5/3.6/3.8 XML tool markup
+/// (`<function=` + `<parameter=`).
+pub fn is_qwen_xml_template(template: &str) -> bool {
+    template.contains("<function=") && template.contains("<parameter=")
+}
+
 /// True when a Jinja template uses Poolside Laguna tool markup
-/// (`<arg_key>` / `<tool_response>` / `<available_tools>`).
+/// (`<arg_key>` / `<available_tools>`). Excludes Qwen XML templates, which
+/// also use `<tool_response>` for tool results.
 pub fn is_poolside_template(template: &str) -> bool {
-    template.contains("<arg_key>")
-        || template.contains("<tool_response>")
-        || template.contains("<available_tools>")
+    !is_qwen_xml_template(template)
+        && (template.contains("<arg_key>")
+            || template.contains("<tool_response>")
+            || template.contains("<available_tools>"))
+}
+
+/// Render one or more tool calls as Qwen XML (`<function=NAME><parameter=K>V</parameter></function>`).
+pub fn format_qwen_xml_tool_calls(calls: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (name, args_json) in calls {
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str("<tool_call>\n<function=");
+        s.push_str(name);
+        s.push_str(">\n");
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(args_json) {
+            for (k, v) in map {
+                s.push_str("<parameter=");
+                s.push_str(&k);
+                s.push_str(">\n");
+                match v {
+                    serde_json::Value::String(val) => s.push_str(&val),
+                    other => s.push_str(&other.to_string()),
+                }
+                s.push_str("\n</parameter>\n");
+            }
+        }
+        s.push_str("</function>\n</tool_call>");
+    }
+    s
 }
 
 /// Render one or more tool calls as a DeepSeek DSML block (fullwidth pipes).

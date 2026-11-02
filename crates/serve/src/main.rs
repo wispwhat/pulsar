@@ -1389,8 +1389,24 @@ fn encode_messages_auto(
     (encode_messages(tok, m, messages, tools), false)
 }
 
-/// Encode OpenAI messages via a resolved Jinja chat template, then
-/// tokenize with special-token recognition.
+/// start of edit by Rob 2026-10-25
+
+/// Extract `function.arguments` as a JSON string regardless of whether the
+/// client sent a serialized JSON string (OpenAI spec) or a raw JSON object
+/// (Ollama / OpenClaw spec). Previously `.as_str().unwrap_or("{}")` silently
+/// wiped object arguments to `"{}"`, poisoning multi-turn tool history.
+#[cfg(target_os = "linux")]
+fn tool_args_of(args: &serde_json::Value) -> String {
+    match args {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(_) => args.to_string(),
+        _ => "{}".to_string(),
+    }
+}
+
+/// start of edit by Rob 2026-10-26
+
+
 #[cfg(target_os = "linux")]
 fn encode_messages_jinja(
     tok: &tokenizer::Tokenizer,
@@ -1400,25 +1416,21 @@ fn encode_messages_jinja(
     enable_thinking: Option<bool>,
     reasoning_effort: Option<&str>,
 ) -> Result<(Vec<u32>, bool), String> {
-    // DeepSeek V4 speaks DSML; Poolside Laguna speaks arg_key/arg_value XML.
-    // Replaying the wrong dialect leaves the model stuck after MCP dispatch.
+    // DeepSeek V4 speaks DSML; Qwen3.6/3.8 speaks <function=...><parameter=...>;
+    // Poolside Laguna speaks <arg_key>/<arg_value> XML.
     let dsml = tool_calls::is_dsml_template(&template.template);
+    let qwen_xml = tool_calls::is_qwen_xml_template(&template.template);
     let poolside = tool_calls::is_poolside_template(&template.template);
-    // Official Laguna Jinja only says "you may call functions" — soft enough
-    // that the model answers standings/news from stale weights. Prepend the
-    // same MUST-call policy ChatMarkers uses so MCP actually fires.
+
     let poolside_force = if poolside && tools.is_some_and(|t| !t.is_empty()) {
         Some(
-            "You MUST call a tool before answering whenever the question is about \
-anything that can change over time (standings, rankings, news, weather, prices, \
-current events, recent releases, live status) OR any specific external fact you \
-are not 100% certain of. Do not ask for permission. Tool calls use this format:\n\
-<tool_call>function_name<arg_key>arg_name</arg_key><arg_value>arg_value</arg_value></tool_call>\n\
-After tool results arrive in <tool_response>, base your answer only on them.",
+            "When calling a tool, use this exact XML format:\n\
+<tool_call>function_name<arg_key>arg_name</arg_key><arg_value>arg_value</arg_value></tool_call>",
         )
     } else {
         None
     };
+
     let mut chat_msgs: Vec<tokenizer::ChatMessage> = Vec::new();
     let mut poolside_force_applied = poolside_force.is_none();
     for msg in messages {
@@ -1442,7 +1454,7 @@ After tool results arrive in <tool_response>, base your answer only on them.",
                     .filter_map(|c| {
                         let f = &c["function"];
                         let name = f["name"].as_str()?.to_string();
-                        let args = f["arguments"].as_str().unwrap_or("{}").to_string();
+                        let args = tool_args_of(&f["arguments"]);
                         Some((name, args))
                     })
                     .collect();
@@ -1452,6 +1464,8 @@ After tool results arrive in <tool_response>, base your answer only on them.",
                     }
                     if dsml {
                         content.push_str(&tool_calls::format_dsml_tool_calls(&pairs));
+                    } else if qwen_xml {
+                        content.push_str(&tool_calls::format_qwen_xml_tool_calls(&pairs));
                     } else if poolside {
                         content.push_str(&tool_calls::format_poolside_tool_calls(&pairs));
                     } else {
@@ -1461,8 +1475,8 @@ After tool results arrive in <tool_response>, base your answer only on them.",
             }
         }
         if role == "tool" {
-            if poolside && !dsml {
-                // Laguna Jinja: role=tool → <tool_response>{{ content }}</tool_response>
+            if (poolside || qwen_xml) && !dsml {
+                // Laguna and Qwen Jinja both map role=tool → <tool_response>{{ content }}</tool_response>
                 chat_msgs.push(tokenizer::ChatMessage {
                     role: "tool".into(),
                     content,
@@ -1534,16 +1548,14 @@ After tool results arrive in <tool_response>, base your answer only on them.",
     if std::env::var_os("PULSAR_DEBUG_CHAT").is_some() {
         eprintln!("pulsar-serve: jinja prompt:\n{rendered}");
     }
-    // Template truth beats style tables: when the rendered prompt ends
-    // inside an open <think> block (Qwen3.8's default, GLM's, Laguna's),
-    // the reply STARTS as reasoning and the first </think> closes it -
-    // the split sites need to know regardless of ChatStyle.
     let opened = rendered.trim_end().ends_with("<think>");
     if std::env::var_os("PULSAR_DEBUG_CHAT").is_some() {
         eprintln!("pulsar-serve: open_think={opened} tail={:?}", &rendered[rendered.len().saturating_sub(24)..]);
     }
     Ok((tok.encode_with_specials(&rendered), opened))
 }
+
+/// Rob
 
 /// Encode OpenAI messages as a Hy3 context: bos, system text, then per
 /// turn user/assistant markers; past assistant turns carry empty think
@@ -1637,7 +1649,7 @@ Tool results arrive as <tool_response>…</tool_response>. {after}"
                             let f = &c["function"];
                             Some((
                                 f["name"].as_str()?.to_string(),
-                                f["arguments"].as_str().unwrap_or("{}").to_string(),
+                                tool_args_of(&f["arguments"]),
                             ))
                         })
                         .collect();
@@ -1680,6 +1692,8 @@ Tool results arrive as <tool_response>…</tool_response>. {after}"
     ids.extend(m.open_assistant(tok));
     ids
 }
+
+// end of edit by Rob 2026.10.25
 
 /// Split generated text into (visible text, parsed tool calls).
 /// Unclosed or unparseable blocks stay in the text untouched.
