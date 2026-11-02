@@ -1,3 +1,5 @@
+> **Note:** This fork contains local workarounds and custom patches for our local agent environment. It is provided as-is and is not maintained for upstream merging.
+
 # Pulsar
 
 ![pulsar](docs/assets/pulsar-poster.png)
